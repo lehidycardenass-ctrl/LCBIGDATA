@@ -1,24 +1,51 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import avg, max, min
+from pyspark.sql.functions import from_json, col, window, sum
+from pyspark.sql.types import StructType, StructField, IntegerType, StringType, FloatType, TimestampType
 
-spark = SparkSession.builder.appName("BatchConsumoEnergia").getOrCreate()
+# Crear sesión de Spark
+spark = SparkSession.builder \
+    .appName("ConsumoEnergiaStreaming") \
+    .getOrCreate()
 
-# Simulación de datos (puedes usar CSV si quieres)
-data = [
-    (1, "Nevera", 1.5),
-    (1, "Televisor", 0.8),
-    (2, "Aire acondicionado", 3.2),
-    (2, "Lavadora", 2.1),
-    (3, "Computador", 1.0)
-]
+# Reducir logs
+spark.sparkContext.setLogLevel("WARN")
 
-columns = ["id_hogar", "dispositivo", "consumo_kwh"]
+# Definir esquema de los datos
+schema = StructType([
+    StructField("id_hogar", IntegerType(), True),
+    StructField("dispositivo", StringType(), True),
+    StructField("consumo_kwh", FloatType(), True),
+    StructField("timestamp", TimestampType(), True)
+])
 
-df = spark.createDataFrame(data, columns)
+# Leer datos desde Kafka
+df = spark.readStream \
+    .format("kafka") \
+    .option("kafka.bootstrap.servers", "localhost:9092") \
+    .option("subscribe", "consumo_energia") \
+    .load()
 
-df.show()
+# Convertir JSON a columnas
+parsed_df = df.select(
+    from_json(col("value").cast("string"), schema).alias("data")
+).select("data.*")
 
-# Análisis batch
-df.groupBy("id_hogar").avg("consumo_kwh").show()
-df.groupBy("id_hogar").max("consumo_kwh").show()
-df.groupBy("id_hogar").min("consumo_kwh").show()
+# Agrupar consumo por hogar en ventanas de 1 minuto
+consumo_total = parsed_df \
+    .groupBy(
+        window(col("timestamp"), "1 minute"),
+        col("id_hogar")
+    ) \
+    .agg(
+        sum("consumo_kwh").alias("total_consumo_kwh")
+    )
+
+# Mostrar resultados en consola
+query = consumo_total \
+    .writeStream \
+    .outputMode("complete") \
+    .format("console") \
+    .start()
+
+# Mantener ejecución activa
+query.awaitTermination()
